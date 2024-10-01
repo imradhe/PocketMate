@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SBI Bank Statement Analyzer</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.0/papaparse.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.7.0/chart.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+</head>
+<body class="container py-4">
+    <h1 class="mb-4">SBI Bank Statement Analyzer</h1>
+    
+    <div class="mb-3">
+        <label for="statementFile" class="form-label">Upload Bank Statement (CSV, XLSX, or XLS)</label>
+        <input type="file" class="form-control" id="statementFile" accept=".csv,.xlsx,.xls">
+    </div>
+
+    <div id="analysisSection" class="d-none">
+        <div class="row mb-3">
+            <div class="col-md-4">
+                <label for="monthSelect" class="form-label">Select Month</label>
+                <select class="form-select" id="monthSelect"></select>
+            </div>
+        </div>
+
+        <div class="row mb-4">
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-body">
+                        <h5 class="card-title">Monthly Summary</h5>
+                        <div id="monthlySummary"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-body">
+                        <h5 class="card-title">Transaction Distribution</h5>
+                        <canvas id="transactionChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card mb-4">
+            <div class="card-body">
+                <h5 class="card-title">Daily Balance Trend</h5>
+                <canvas id="balanceChart"></canvas>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-body">
+                <h5 class="card-title">Transactions</h5>
+                <div class="table-responsive">
+                    <table class="table table-striped" id="transactionTable">
+                        <thead>
+                            <tr>
+                                <th>Date</th>
+                                <th>Description</th>
+                                <th>Debit</th>
+                                <th>Credit</th>
+                                <th>Balance</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Format currency in Indian format
+        function formatIndianCurrency(amount) {
+            return new Intl.NumberFormat('en-IN', {
+                style: 'currency',
+                currency: 'INR'
+            }).format(amount);
+        }
+
+        // Parse Indian currency string to number
+        function parseIndianCurrency(str) {
+            if (!str) return 0;
+            return parseFloat(String(str).replace(/,/g, ''));
+        }
+
+        let transactionData = [];
+        let balanceChart, transactionChart;
+
+        document.getElementById('statementFile').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            const fileType = file.name.split('.').pop().toLowerCase();
+
+            if (fileType === 'csv') {
+                Papa.parse(file, {
+                    complete: function(results) {
+                        processData(results.data);
+                    }
+                });
+            } else if (fileType === 'xlsx' || fileType === 'xls') {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    const data = e.target.result;
+                    const workbook = XLSX.read(data, {type: 'binary'});
+                    const firstSheetName = workbook.SheetNames[0];
+                    const worksheet = workbook.Sheets[firstSheetName];
+                    const excelData = XLSX.utils.sheet_to_json(worksheet, {header: 1});
+                    processData(excelData);
+                };
+                reader.readAsBinaryString(file);
+            }
+        });
+
+        function processData(data) {
+            // Remove header and empty rows
+            transactionData = data.slice(1).filter(row => row.length > 1).map(row => ({
+                date: new Date(row[0]),
+                description: row[2],
+                debit: parseIndianCurrency(row[4]),
+                credit: parseIndianCurrency(row[5]),
+                balance: parseIndianCurrency(row[6])
+            })).filter(row => !isNaN(row.date.getTime())); // Remove invalid dates
+
+            // Sort by date
+            transactionData.sort((a, b) => a.date - b.date);
+
+            // Populate month dropdown
+            const months = [...new Set(transactionData.map(t => 
+                `${t.date.getFullYear()}-${String(t.date.getMonth() + 1).padStart(2, '0')}`
+            ))];
+            
+            const monthSelect = document.getElementById('monthSelect');
+            monthSelect.innerHTML = months.map(month => 
+                `<option value="${month}">${new Date(month).toLocaleString('default', { month: 'long', year: 'numeric' })}</option>`
+            ).join('');
+
+            monthSelect.addEventListener('change', updateAnalysis);
+
+            document.getElementById('analysisSection').classList.remove('d-none');
+            updateAnalysis();
+        }
+
+        function updateAnalysis() {
+            const selectedMonth = document.getElementById('monthSelect').value;
+            const [year, month] = selectedMonth.split('-');
+            
+            const monthData = transactionData.filter(t => 
+                t.date.getFullYear() === parseInt(year) && 
+                t.date.getMonth() === parseInt(month) - 1
+            );
+
+            updateMonthlySummary(monthData);
+            updateTransactionChart(monthData);
+            updateBalanceChart(monthData);
+            updateTransactionTable(monthData);
+        }
+
+        function updateMonthlySummary(monthData) {
+            const totalDebit = monthData.reduce((sum, t) => sum + (t.debit || 0), 0);
+            const totalCredit = monthData.reduce((sum, t) => sum + (t.credit || 0), 0);
+            const netChange = totalCredit - totalDebit;
+
+            document.getElementById('monthlySummary').innerHTML = `
+                <p>Total Debit: ${formatIndianCurrency(totalDebit)}</p>
+                <p>Total Credit: ${formatIndianCurrency(totalCredit)}</p>
+                <p>Net Change: ${formatIndianCurrency(netChange)}</p>
+            `;
+        }
+
+        function updateTransactionChart(monthData) {
+            const ctx = document.getElementById('transactionChart').getContext('2d');
+            
+            if (transactionChart) {
+                transactionChart.destroy();
+            }
+
+            const totalDebit = monthData.reduce((sum, t) => sum + (t.debit || 0), 0);
+            const totalCredit = monthData.reduce((sum, t) => sum + (t.credit || 0), 0);
+
+            transactionChart = new Chart(ctx, {
+                type: 'pie',
+                data: {
+                    labels: ['Debit', 'Credit'],
+                    datasets: [{
+                        data: [totalDebit, totalCredit],
+                        backgroundColor: ['#dc3545', '#28a745']
+                    }]
+                },
+                options: {
+                    plugins: {
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    let label = context.label || '';
+                                    if (label) {
+                                        label += ': ';
+                                    }
+                                    label += formatIndianCurrency(context.raw);
+                                    return label;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        function updateBalanceChart(monthData) {
+            const ctx = document.getElementById('balanceChart').getContext('2d');
+            
+            if (balanceChart) {
+                balanceChart.destroy();
+            }
+
+            balanceChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: monthData.map(t => t.date.toLocaleDateString()),
+                    datasets: [{
+                        label: 'Balance',
+                        data: monthData.map(t => t.balance),
+                        borderColor: '#007bff',
+                        tension: 0.1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    scales: {
+                        y: {
+                            ticks: {
+                                callback: function(value) {
+                                    return formatIndianCurrency(value);
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        function updateTransactionTable(monthData) {
+            const tbody = document.querySelector('#transactionTable tbody');
+            tbody.innerHTML = monthData.map(t => `
+                <tr>
+                    <td>${t.date.toLocaleDateString()}</td>
+                    <td>${t.description}</td>
+                    <td>${t.debit ? formatIndianCurrency(t.debit) : ''}</td>
+                    <td>${t.credit ? formatIndianCurrency(t.credit) : ''}</td>
+                    <td>${formatIndianCurrency(t.balance)}</td>
+                </tr>
+            `).join('');
+        }
+    </script>
+</body>
+</html>
